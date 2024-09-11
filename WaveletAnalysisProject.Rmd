@@ -1,0 +1,188 @@
+---
+title: "Wavelet Analysis Project"
+author: "Gabriel Majeri"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Analysis of weather data from Mannheim
+
+In this notebook, we will use wavelet analysis to understand a time series of weather data, recorded in the city of Mannheim. Our main tool will be [the `WaveletComp` R package](https://cran.r-project.org/web/packages/WaveletComp/index.html).
+
+The dataset contains a total of 3652 samples, recorded between January 2005 through December 2014. Each observation consists of:
+- Date
+- Temperature
+- Relative humidity
+- Ambient radiation (ambient $\gamma$ radiation dose rate)
+These values were registered in [Mannheim](https://en.wikipedia.org/wiki/Mannheim), a city in the state of Baden-Württemberg, Germany. More details about the source of the data can be found in the [official documentation](https://cran.r-project.org/web/packages/WaveletComp/WaveletComp.pdf) for the `WaveletComp` package.
+
+```{r, include = FALSE}
+library(ggplot2)
+library(WaveletComp)
+```
+
+## Initial look at the data
+
+Let's start by loading the time series data:
+
+```{r}
+data(weather.radiation.Mannheim)
+dataset <- weather.radiation.Mannheim
+```
+
+and converting it to a format we can more easily manage:
+
+```{r}
+df <- data.frame(
+  date = as.Date(dataset$date),
+  temperature = dataset$temperature,
+  humidity = dataset$humidity,
+  radiation = dataset$radiation
+)
+```
+
+Now we can plot it using the [`ggplot2`](https://ggplot2.tidyverse.org/) package:
+
+```{r}
+ggplot(
+  data = df,
+  mapping = aes(x = date, y = temperature)
+) + geom_line()
+```
+
+We can visually identify some recurrent patterns in the temperature data, but we want to be more rigorous and obtain some quantitative results.
+
+## General aspects of wavelet analysis
+
+The `WaveletComp` package works by performing *wavelet analysis*, i.e. convoluting the input signal (time series data) with a *Morlet wavelet*.
+
+The fundamental wavelet used is the *Morlet wavelet*, given by the formula $$
+    \psi(t) = \pi^{-1/4} \cdot e^{-t^2/2} \cdot e^{i \omega t}
+$$ The preferred value for the angular frequency (the parameter $\omega$) is 6, which is relatively close to $2 \pi \approx 6.28{\ldots}$.
+
+```{r, include = FALSE}
+ts <- seq(-3, 3, length.out = 128)
+morlet_wavelet <- function (t, omega = 6) {
+  pi^(-1/4) * exp(- t^2 / 2) * exp(1i * omega * t)
+}
+wavelet_samples <- morlet_wavelet(ts)
+
+wavelet_df <- data.frame(
+  t = ts,
+  psi_real = Re(wavelet_samples),
+  psi_imag = Im(wavelet_samples),
+  psi_abs = abs(wavelet_samples),
+  psi_arg = Arg(wavelet_samples)
+)
+```
+
+Graphically, we can represent it as follows:
+
+```{r, echo = FALSE}
+ggplot(data = wavelet_df) + 
+  geom_line(mapping = aes(x = t, y = psi_real)) +
+  geom_line(mapping = aes(x = t, y = psi_imag), color = 'magenta')
+```
+
+Or like this if we want a plot of the absolute value and the argument:
+
+```{r, echo = FALSE}
+hsv2rgb <- function(x, alpha = FALSE) {
+  if (any(is.na(x))) {
+    return (rep(NA, 3)) 
+  } else {
+    return (grDevices::col2rgb(grDevices::hsv(x[1], x[2], x[3]), alpha = alpha))
+  }
+}
+
+angle_to_rgb <- function (theta) {
+  normalized_angle <- (theta + pi) / (2 * pi)
+  hsv2rgb(c(normalized_angle, 1, 1))
+}
+
+angle_to_hex <- function (theta) {
+  rgb_values <- angle_to_rgb(theta)
+  rgb(rgb_values[1], rgb_values[2], rgb_values[3], maxColorValue = 255)
+}
+
+color_values = lapply(wavelet_df$psi_arg, FUN = angle_to_hex)
+
+ggplot(
+  data = wavelet_df,
+  mapping = aes(x = t, y = psi_abs)
+) + 
+  geom_segment(
+    aes(xend = t, yend = 0, color = color_values),
+    linewidth = 1.5
+  ) +
+  geom_line() +
+  scale_color_identity()
+```
+
+This base wavelet is then shifted and scaled and convolved each time with the time series, in order to extract information from it.
+
+### Convolution of a wavelet with the time series
+
+Let $x_t$ be our time series. The formula for computing the Morlet wavelet transform is
+
+$$
+  \operatorname{Wavelet}(\tau, s) = \sum_{t} x_t \cdot \frac{1}{\sqrt{s}} \cdot \overline{\psi \left(\frac{t - \tau}{s}\right)}
+$$
+
+where the line over the factor with $\psi$ denotes complex conjugation.
+
+The result of evaluating this function for various values of the time shift $\tau$ and various frequencies $s$ is that we obtain the overlap between a scaled version of the base wavelet and the signal delayed to a certain moment in time.
+
+## Performing wavelet analysis on the time series data
+
+Now that we conceptually understand how wavelet analysis works, we can apply it to our original time series. See the comments in the code below for the reasoning we use when picking the various parameters:
+
+```{r, message = FALSE}
+wavelet_result <- analyze.wavelet(
+  df, 'temperature',
+  # We do not want to do any detrending                      
+  loess.span = 0,
+  # Time unit
+  dt = 1,
+  # Range of periods in the frequency domain.
+  # We want to detect events happening with periodicity between
+  # 2 (two days) and 730 (two years).
+  lowerPeriod = 2,
+  upperPeriod = 730,
+  dj = 1/250,
+  # We don't want to compute p-values for the relevancy of
+  # various periods at this point
+  make.pval = FALSE
+)
+```
+
+With the wavelet transform computed and the wavelet coefficients extracted, we can now plot a spectral representation of our original signal:
+
+```{r, message = FALSE}
+ggplot(data = df, mapping = aes(x = date, y = temperature)) + geom_line()
+
+wt.image(
+  wavelet_result,
+  color.key = 'quantile',
+  n.levels = 365,
+  legend.params = list(lab = 'wavelet power levels', mar = 4.7)
+)
+```
+
+On the $x$ axis, we see an evolution of time (given as the index in the original time series, where $x = 0$ corresponds to the start time of the signal recording $t = 0$). On the $y$ axis, we have the periods taken into consideration (recall that the period is the inverse of the frequency, $T = \frac{2 \pi}{\omega}$).
+
+We can notice that the strongest periodic signal is the one having a periodicity of about 365 days -- precisely one year.
+
+## Reconstructing the original signal back from the wavelet transform
+
+We can also (approximately) reconstruct the original signal by piecing back together the coefficients obtained from the wavelet transform:
+
+```{r}
+reconstruct(
+  wavelet_result, plot.waves = FALSE, lwd = c(1,2),
+  legend.coords = "bottomleft", ylim = c(-20, 20)
+)
+```
+
+The reproduced signal is obviously not precisely the original signal, but it's a close match.
